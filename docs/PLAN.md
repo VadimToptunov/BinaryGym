@@ -38,6 +38,34 @@
   Исправлено чтением таблицы через `volatile`-указатель; добавлен регрессионный тест на 20 seed × 2 стратегии.
 - **Лицензия пока не указана** в `pyproject.toml` — ждёт решения (вопрос 3).
 
+### Разработка на macOS
+
+6. **На Mac работаем в Linux-контейнере (Docker / OrbStack).** Цель MVP — Linux x86_64 ELF, а нативный
+   clang на macOS собирает Mach-O (на Apple Silicon — arm64), и политика `LinuxCSafetyPolicy` (`nm -D`)
+   к нему неприменима. Нативная поддержка Mac — это отдельный будущий backend, а не обход в Linux-backend'е.
+
+   ```bash
+   # из каталога binarygym/ на Mac
+   docker run --rm -it --platform linux/amd64 \
+     -v "$PWD":/work -w /work python:3.12 bash
+
+   # внутри контейнера
+   pip install -e '.[dev]'
+   pytest
+   binarygym generate --seed 12345
+   ```
+
+   - `python:3.12` (полный образ) уже содержит gcc и binutils; clang опционален
+     (`apt-get update && apt-get install -y clang`), иначе используется gcc.
+   - `--platform linux/amd64` даёт ровно целевую платформу; на Apple Silicon — через эмуляцию (медленнее).
+   - Код правится на Mac, тесты и генерация запускаются в контейнере (каталог смонтирован).
+   - Для gdb внутри контейнера: `--cap-add=SYS_PTRACE`. Под эмуляцией на Apple Silicon gdb может быть
+     нестабилен; для динамического анализа надёжнее Linux-VM (UTM / Lima) или облачная сессия.
+   - Нативно на Mac работают `binarygym verify` (чистый Python) и статический анализ ELF в Ghidra / IDA Free /
+     Binary Ninja / Cutter; запустить ELF на macOS нельзя.
+   - Альтернатива контейнеру — облачные сессии Claude Code (Linux x86_64, проверено).
+   - Не проверено на реальном Mac: это вывод из устройства кода; первая проверка — в начале следующей сессии.
+
 ---
 
 ## 1. Что такое BinaryGym
@@ -336,6 +364,9 @@ Python 3.12+, type hints, pathlib, ruff, mypy. Без DI-фреймворков,
 Срез готов, когда реально сгенерирована, скомпилирована, запущена (правильный и неправильный ввод) и проверена задача, а повторная генерация с тем же seed даёт идентичный spec.
 
 **Срез 2 — ширина:** остальные примитивы, семейства `direct` и `state_machine`, команды `inspect [--private]`, `doctor`, `list-families`.
+`doctor` и `generate` должны проверять хост: если ОС/архитектура не совпадают с целью backend'а (например,
+macOS или arm64 для `linux-c`), сразу выдавать понятную ошибку с подсказкой про Docker, а не падать на валидации.
+Проверять также наличие `nm` (binutils).
 
 **Срез 3 — надёжность и документация:** golden-тесты, проверка побитовой идентичности бинарника на одном toolchain, README / ARCHITECTURE / SAFETY.
 
@@ -417,6 +448,6 @@ Python 3.12+, type hints, pathlib, ruff, mypy. Без DI-фреймворков,
 2. ARM64 и x86, режимы strip и оптимизации как оси сложности.
 3. Структурированные подсказки в CLI (`binarygym hint`).
 4. `generate-batch` и упражнения на автоматизацию реверса.
-5. Новые backend'ы: Windows PE, JVM, .NET, Wasm, Android.
+5. Новые backend'ы: Windows PE, macOS (`MacOSCBackend`: Mach-O arm64/x86_64, своя политика импортов через `nm -u`/`otool`), JVM, .NET, Wasm, Android.
 6. Синтетические malware-подобные упражнения — по правилам раздела 6.
 7. Серверная модель хранения приватных данных, эмпирическая сложность.
