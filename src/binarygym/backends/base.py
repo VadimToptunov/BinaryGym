@@ -11,7 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from binarygym.spec import ChallengeSpec, Target
+from binarygym.build import Target
+from binarygym.spec import ChallengeSpec
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,10 @@ class Backend(Protocol):
     name: str
     target: Target
     safety_policy: SafetyPolicy
+
+    def host_problems(self) -> list[str]:
+        """Reasons this host cannot build and run the backend's artifacts (empty: fine)."""
+        ...
 
     def strategies(self, spec: ChallengeSpec) -> tuple[str, ...]:
         """Rendering strategies available for this spec's checker."""

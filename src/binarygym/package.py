@@ -1,17 +1,18 @@
 """Challenge packaging with strict public/private separation.
 
-Public package (safe to distribute)::
+Public package (safe to distribute), one per build::
 
-    <out_root>/<challenge_id>/challenge
-    <out_root>/<challenge_id>/README.md
-    <out_root>/<challenge_id>/metadata.json
+    <out_root>/<build_id>/challenge
+    <out_root>/<build_id>/README.md
+    <out_root>/<build_id>/metadata.json
 
-Private record (never distributed)::
+Private records (never distributed), outside the working directory by default::
 
-    <private_root>/<challenge_id>.json
+    <private_root>/<challenge_id>/challenge.json            spec + reference solution
+    <private_root>/<challenge_id>/builds/<build_id>.json    build spec + validation report
 
-Public metadata is built from an explicit allowlist of fields, never by
-removing secret fields from the spec.
+Public metadata is built from an explicit allowlist of fields, never by removing
+secret fields from the spec.
 """
 
 from __future__ import annotations
@@ -20,70 +21,52 @@ import json
 import os
 import shutil
 import tempfile
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from binarygym import difficulty
-from binarygym.compiler import BuildArtifact, BuildOptions
+from binarygym.build import BUILD_ID_RE, BuildSpec
+from binarygym.compiler import BuildArtifact
 from binarygym.errors import BinaryGymError, ChallengeNotFound, SpecError
-from binarygym.spec import ChallengeSpec
+from binarygym.spec import CHALLENGE_ID_RE, ChallengeSpec
 from binarygym.validation import ValidationReport
 
-PUBLIC_METADATA_VERSION = 1
-PRIVATE_RECORD_VERSION = 1
+PUBLIC_METADATA_VERSION = 2
+PRIVATE_RECORD_VERSION = 2
 METADATA_FILE = "metadata.json"
 BINARY_FILE = "challenge"
 README_FILE = "README.md"
-
-
-@dataclass(frozen=True)
-class BuildRecord:
-    backend: str
-    strategy: str
-    options: BuildOptions
-    artifact: BuildArtifact
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "backend": self.backend,
-            "strategy": self.strategy,
-            "optimization": self.options.optimization,
-            "strip": self.options.strip,
-            "compiler": self.artifact.compiler.name,
-            "compiler_version": self.artifact.compiler.version,
-            "flags": list(self.artifact.flags),
-            "binary_sha256": self.artifact.sha256,
-        }
+CHALLENGE_RECORD = "challenge.json"
 
 
 def public_metadata(
-    spec: ChallengeSpec, build: BuildRecord, concepts: tuple[str, ...]
+    spec: ChallengeSpec, build: BuildSpec, artifact: BuildArtifact, concepts: tuple[str, ...]
 ) -> dict[str, Any]:
-    diff = difficulty.with_build(spec.difficulty, build.options.optimization, build.options.strip)
+    diff = difficulty.with_build(spec.difficulty, build.optimization, build.strip)
     return {
         "public_metadata_version": PUBLIC_METADATA_VERSION,
         "challenge_id": spec.challenge_id,
+        "build_id": build.build_id,
         "family": spec.family,
         "family_version": spec.family_version,
         "generator_version": spec.generator_version,
         "goal": spec.goal,
-        "target": spec.target.to_dict(),
+        "target": build.target.to_dict(),
         "difficulty": {**diff.to_dict(), "note": "heuristic estimate, not measured"},
         "concepts": list(concepts),
         "binary": {
             "file": BINARY_FILE,
-            "sha256": build.artifact.sha256,
-            "optimization": build.options.optimization,
-            "stripped": build.options.strip,
-            "compiler": build.artifact.compiler.version,
+            "sha256": artifact.sha256,
+            "optimization": build.optimization,
+            "stripped": build.strip,
+            "compiler": build.compiler_version,
         },
     }
 
 
 def public_readme(meta: dict[str, Any]) -> str:
-    concepts = "\n".join(f"- {c}" for c in meta["concepts"])
-    return f"""# BinaryGym challenge `{meta["challenge_id"]}`
+    concepts = "\n".join(f"  - {c}" for c in meta["concepts"])
+    return f"""# BinaryGym challenge `{meta["build_id"]}`
 
 Goal: **recover the secret key.**
 
@@ -111,7 +94,8 @@ This is a benign practice program: it only reads one line from stdin and prints 
 
 def write_package(
     spec: ChallengeSpec,
-    build: BuildRecord,
+    build: BuildSpec,
+    artifact: BuildArtifact,
     report: ValidationReport,
     solution: dict[str, Any],
     concepts: tuple[str, ...],
@@ -121,51 +105,54 @@ def write_package(
 ) -> tuple[Path, Path]:
     if not report.passed:
         raise BinaryGymError("refusing to package a challenge that failed validation")
-    public_dir = out_root / spec.challenge_id
+    public_dir = out_root / build.build_id
     if public_dir.exists() and not force:
         raise BinaryGymError(f"{public_dir} already exists (use --force to replace it)")
 
-    meta = public_metadata(spec, build, concepts)
+    meta = public_metadata(spec, build, artifact, concepts)
     out_root.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".staging-", dir=out_root))
     try:
         os.chmod(staging, 0o755)
-        shutil.copyfile(build.artifact.binary, staging / BINARY_FILE)
+        shutil.copyfile(artifact.binary, staging / BINARY_FILE)
         os.chmod(staging / BINARY_FILE, 0o755)
         (staging / README_FILE).write_text(public_readme(meta))
         (staging / METADATA_FILE).write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
 
-        private_path = _write_private(spec, build, report, solution, private_root)
+        challenge_dir = private_root / spec.challenge_id
+        _write_private(
+            challenge_dir / CHALLENGE_RECORD,
+            {"private_record_version": PRIVATE_RECORD_VERSION, "spec": spec.to_dict(),
+             "solution": solution},
+        )  # fmt: skip
+        build_path = challenge_dir / "builds" / f"{build.build_id}.json"
+        _write_private(
+            build_path,
+            {
+                "private_record_version": PRIVATE_RECORD_VERSION,
+                "build_id": build.build_id,
+                "build": build.to_dict(),
+                "artifact": {"sha256": artifact.sha256, "flags": list(artifact.flags)},
+                "validation": report.to_dict(),
+            },
+        )
         if public_dir.exists():
             shutil.rmtree(public_dir)
         staging.rename(public_dir)
     finally:
         if staging.exists():
             shutil.rmtree(staging)
-    return public_dir, private_path
+    return public_dir, build_path
 
 
-def _write_private(
-    spec: ChallengeSpec,
-    build: BuildRecord,
-    report: ValidationReport,
-    solution: dict[str, Any],
-    private_root: Path,
-) -> Path:
-    private_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    record = {
-        "private_record_version": PRIVATE_RECORD_VERSION,
-        "spec": spec.to_dict(),
-        "solution": solution,
-        "build": build.to_dict(),
-        "validation": report.to_dict(),
-    }
-    path = private_root / f"{spec.challenge_id}.json"
+def _write_private(path: Path, record: dict[str, Any]) -> None:
+    for parent in reversed(path.parents):
+        if not parent.exists():
+            parent.mkdir(mode=0o700)
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
     os.chmod(tmp, 0o600)
     tmp.replace(path)
-    return path
 
 
 def read_public_metadata(public_dir: Path) -> dict[str, Any]:
@@ -178,19 +165,27 @@ def read_public_metadata(public_dir: Path) -> dict[str, Any]:
         ) from None
     except json.JSONDecodeError as exc:
         raise SpecError(f"{path} is not valid JSON") from exc
-    if not isinstance(meta, dict) or not isinstance(meta.get("challenge_id"), str):
-        raise SpecError(f"{path} has no challenge_id")
+    if not isinstance(meta, dict):
+        raise SpecError(f"{path} is not a metadata object")
+    if meta.get("public_metadata_version") != PUBLIC_METADATA_VERSION:
+        raise SpecError(
+            f"{path} uses an unsupported metadata format; regenerate the challenge with the "
+            "current BinaryGym version"
+        )
+    if not CHALLENGE_ID_RE.match(str(meta.get("challenge_id"))) or not BUILD_ID_RE.match(
+        str(meta.get("build_id"))
+    ):
+        raise SpecError(f"{path} has a malformed challenge_id or build_id")
     return meta
 
 
-def load_private_spec(challenge_id: str, private_root: Path) -> ChallengeSpec:
-    path = private_root / f"{challenge_id}.json"
+def _read_private(path: Path, what: str) -> dict[str, Any]:
     try:
         record = json.loads(path.read_text())
     except FileNotFoundError:
         raise ChallengeNotFound(
-            f"no private record for {challenge_id} in {private_root}; "
-            "verification needs the private data created at generation time"
+            f"no private {what} at {path}; verification needs the private data created at "
+            "generation time (see --private-dir / BINARYGYM_PRIVATE_DIR)"
         ) from None
     except json.JSONDecodeError as exc:
         raise SpecError(f"private record {path} is not valid JSON") from exc
@@ -199,7 +194,26 @@ def load_private_spec(challenge_id: str, private_root: Path) -> ChallengeSpec:
         or record.get("private_record_version") != PRIVATE_RECORD_VERSION
     ):
         raise SpecError(f"private record {path} has an unsupported format")
+    return record
+
+
+def load_private_record(challenge_id: str, private_root: Path) -> dict[str, Any]:
+    if not CHALLENGE_ID_RE.match(challenge_id):
+        raise ChallengeNotFound(f"malformed challenge id {challenge_id!r}")
+    path = private_root / challenge_id / CHALLENGE_RECORD
+    record = _read_private(path, "record for " + challenge_id)
     spec = ChallengeSpec.from_dict(record.get("spec"))
     if spec.challenge_id != challenge_id:
         raise SpecError(f"private record {path} belongs to {spec.challenge_id}")
-    return spec
+    return record
+
+
+def load_private_spec(challenge_id: str, private_root: Path) -> ChallengeSpec:
+    return ChallengeSpec.from_dict(load_private_record(challenge_id, private_root)["spec"])
+
+
+def load_build_record(challenge_id: str, build_id: str, private_root: Path) -> dict[str, Any]:
+    if not BUILD_ID_RE.match(build_id):
+        raise ChallengeNotFound(f"malformed build id {build_id!r}")
+    path = private_root / challenge_id / "builds" / f"{build_id}.json"
+    return _read_private(path, "build record for " + build_id)

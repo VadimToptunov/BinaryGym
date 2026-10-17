@@ -12,6 +12,14 @@ HAS_TOOLCHAIN = bool((shutil.which("clang") or shutil.which("gcc")) and shutil.w
 needs_toolchain = pytest.mark.skipif(not HAS_TOOLCHAIN, reason="needs a C compiler and nm")
 
 
+@pytest.fixture(autouse=True)
+def isolated_private_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Never let tests touch the real ~/.local/share/binarygym."""
+    store = tmp_path / "default-private"
+    monkeypatch.setenv("BINARYGYM_PRIVATE_DIR", str(store))
+    return store
+
+
 @pytest.fixture
 def generated(tmp_path: Path) -> GenerationResult:
     return generate_challenge(

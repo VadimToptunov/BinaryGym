@@ -1,6 +1,6 @@
 # BinaryGym — план MVP, архитектура и риски
 
-> Статус: план утверждён (ревизия 2). Идёт реализация среза 1.
+> Статус: план утверждён (ревизия 2). Срезы 1 и 2 реализованы; следующий — срез 3.
 > Цель первого этапа — доказать одно утверждение:
 > **«Мы можем надёжно генерировать много уникальных, воспроизводимых, решаемых и автоматически проверенных задач по реверс-инжинирингу».**
 
@@ -37,6 +37,33 @@
   компилятор обратил побайтовый пайплайн и положил открытый секрет в бинарник как константу сравнения.
   Исправлено чтением таблицы через `volatile`-указатель; добавлен регрессионный тест на 20 seed × 2 стратегии.
 - **Лицензия — MIT** (файл `LICENSE` репозитория, `license = "MIT"` в `pyproject.toml`).
+
+### Уточнения по итогам реализации среза 2
+
+- **Схема v2.** `target` вынесен из ChallengeSpec в `BuildSpec` (`build.py`): платформа, backend, стратегия,
+  компилятор и опции. У каждой сборки — свой детерминированный `build_id` (`bgb-…`); логический
+  `challenge_id` (`bg-…`) от платформы больше не зависит. Записи схемы v1 не читаются — ошибка с подсказкой
+  «перегенерируйте» (конвертер не делали: пользовательских данных ещё нет).
+- **Раскладка данных.** Публичный пакет — `generated/<build_id>/`. Приватное —
+  `<private>/<challenge_id>/challenge.json` (spec + решение) и `<private>/<challenge_id>/builds/<build_id>.json`
+  (BuildSpec + отчёт валидации). По умолчанию `<private>` = `$BINARYGYM_PRIVATE_DIR` или
+  `$XDG_DATA_HOME/binarygym/private` (`~/.local/share/binarygym/private`). `doctor` предупреждает,
+  если хранилище внутри текущей папки.
+- **Версии семейств сохраняются.** `transformation` v1 (XOR/ROL) оставлен рядом с v2, `--family-version`
+  выбирает версию. Golden-тест подтверждает: v1 для seed 12345 после рефакторинга даёт тот же секрет и
+  `expected`. Golden-тесты закрепляют секрет и хэш checker'а, а не `challenge_id` (он включает
+  `generator_version` и меняется с каждым релизом).
+- **Единственность ответа проверяется, а не предполагается.** У каждого checker'а есть `accepted_count()`;
+  spec отклоняется, если ответов не ровно один. Для `byte_compare` это следует из биективности примитивов
+  (проверено свойствами), для конечного автомата — считается динамическим программированием по автомату.
+- **Автомату понадобилась проверка длины.** Обратные рёбра позволяют более длинным входам дойти до
+  accept (например, «символ + возврат + секрет»), поэтому checker и C-код сначала проверяют длину.
+- **Стратегии объявляют применимость.** `fused_loop` не предлагается для пайплайнов с перестановкой,
+  `string_compare` — только для открытого ответа (`direct`). Детектор `plaintext_leak_regression`
+  пропускается только там, где checker встраивает ответ по замыслу (`embeds_plaintext()`).
+- **Правила пайплайна v2.** 3–5 шагов; соседние шаги из одной «группы слияния» запрещены (XOR и
+  позиционный XOR сливаются в один XOR); S-box и перестановка — не более одного раза. Генерируемый S-box —
+  без неподвижных точек, перестановка — не тождественная.
 
 ### Разработка на macOS
 
@@ -377,23 +404,22 @@ Spec не содержит платформенных предположений
 
 ```
 pyproject.toml          # hatchling; deps: typer; dev: pytest, hypothesis, ruff, mypy
-README.md  ARCHITECTURE.md  SAFETY.md  LICENSE
+README.md  LICENSE  docs/PLAN.md          # ARCHITECTURE.md, SAFETY.md — срез 3
 src/binarygym/
-  __init__.py   cli.py
+  cli.py               # generate / verify / inspect / list-families / doctor
   rng.py               # SplitMix64 и подпотоки
-  spec.py              # ChallengeSpec, сериализация, валидация входа
+  spec.py              # ChallengeSpec (схема v2), checker'ы, сериализация
+  build.py             # BuildSpec, Target, build_id
   transforms.py        # примитивы: generate / apply / invert / concept
-  reference.py         # эталонный вычислитель checker'ов
-  difficulty.py
-  families/  __init__.py  base.py  direct.py  transformation.py  state_machine.py
-  backends/  __init__.py  c_linux.py
-  compiler.py   runner.py   validation.py   package.py   verify.py
+  reference.py         # контракт ввода и эталонный вычислитель
+  difficulty.py  paths.py  errors.py
+  families/  base.py  direct.py  transformation.py  state_machine.py
+  backends/  base.py  c_linux.py         # стратегии + LinuxCSafetyPolicy + проверка хоста
+  compiler.py   runner.py   validation.py   generate.py   package.py   verify.py
 tests/
-  test_rng.py                    test_spec_serialization.py
-  test_transforms.py             test_families_determinism.py
-  test_golden.py                 test_backend_c.py
-  test_validation.py             test_package_privacy.py
-  test_cli.py                    test_runner_timeout.py
+  test_rng.py  test_transforms.py  test_spec.py  test_families.py  test_reference.py
+  test_backend_c.py  test_validation.py  test_package_and_verify.py  test_runner.py
+  test_paths.py  test_cli.py
 ```
 
 Python 3.12+, type hints, pathlib, ruff, mypy. Без DI-фреймворков, абстрактных фабрик, плагинных систем и async.
@@ -406,7 +432,7 @@ Python 3.12+, type hints, pathlib, ruff, mypy. Без DI-фреймворков,
 `rng` → `spec` → XOR и ROL → семейство `transformation` → C backend → компилятор → runner → валидатор → упаковка → `generate` / `verify`.
 Срез готов, когда реально сгенерирована, скомпилирована, запущена (правильный и неправильный ввод) и проверена задача, а повторная генерация с тем же seed даёт идентичный spec.
 
-**Срез 2 — ширина:** остальные примитивы, семейства `direct` и `state_machine`, команды `inspect [--private]`, `doctor`, `list-families`.
+**Срез 2 — ширина** ✅ (реализовано, см. «Уточнения по итогам реализации среза 2»): остальные примитивы, семейства `direct` и `state_machine`, команды `inspect [--private]`, `doctor`, `list-families`.
 В той же смене схемы (`schema_version 2`): `target` → BuildSpec, `build_id` — см. «Совместимость с картой навыков» в разделе 0.
 **Приватное хранилище — вне рабочей папки:** по умолчанию `~/.local/share/binarygym/private` (с учётом
 `XDG_DATA_HOME`) вместо `./.binarygym/private`, переопределяется `--private-dir`. Причина: ИИ-агент с доступом к

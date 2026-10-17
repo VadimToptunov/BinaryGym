@@ -7,7 +7,8 @@ Checks (all must pass):
 * the binary agrees with the reference evaluator on every probe (including edge cases
   such as CRLF, embedded NUL and over-long lines);
 * every run finishes within the timeout and prints a well-formed verdict;
-* ``plaintext_leak_regression``: the secret does not appear verbatim in the binary.
+* ``plaintext_leak_regression``: the secret does not appear verbatim in the binary
+  (skipped for checkers that embed the answer by design, e.g. the ``direct`` family).
   This is a regression/leak detector for generator or optimizer mistakes only. It says
   nothing about how hard the challenge is or how resistant it is to analysis;
 * the backend's own safety policy (target-specific; the validator knows no rules itself).
@@ -126,6 +127,7 @@ def validate(
         if got != ref:
             disagreements.append(probe.label)
 
+    plaintext_intended = spec.checker.embeds_plaintext()
     secret_leaked = spec.secret.value.encode("ascii") in binary.read_bytes()
     violations = policy.check(binary)
     n = len(probes)
@@ -137,8 +139,12 @@ def validate(
         Check("within_timeout", not timeouts, f"timeout={timeout}s; " + _detail(timeouts, n)),
         Check(
             "plaintext_leak_regression",
-            not secret_leaked,
-            "secret bytes found verbatim in binary" if secret_leaked else "no verbatim secret",
+            plaintext_intended or not secret_leaked,
+            "skipped: this family stores the answer in plaintext by design"
+            if plaintext_intended
+            else "secret bytes found verbatim in binary"
+            if secret_leaked
+            else "no verbatim secret",
         ),
         Check(f"safety_policy:{policy.name}", not violations, "; ".join(violations) or "ok"),
     )
